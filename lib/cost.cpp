@@ -5,6 +5,7 @@
 #include "cost-command.h"
 
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/IR/InstrTypes.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Support/Casting.h"
@@ -15,14 +16,11 @@
 
 #include <fstream>
 #include <map>
-#include <unistd.h>
 
 using namespace llvm;
 using namespace std;
 
 namespace minotaur {
-
-bool Init = false;
 
 unsigned get_machine_cost(Function *F) {
   llvm::Module M("", F->getContext());
@@ -96,26 +94,63 @@ unsigned get_machine_cost(Function *F) {
   return cycle;
 }
 
-// simply count lines of code without bitcast for now
 unsigned get_approx_cost(llvm::Function *F) {
   unsigned cost = 0;
   for (auto &BB : *F) {
     for (auto &I : BB) {
-      if (isa<BitCastInst>(&I)) {
-        cost += 0;
+      if (isa<Argument>(&I)) {
+        cost += 1;
+        // reserved const
       } else if (CallInst *CI = dyn_cast<CallInst>(&I)) {
         auto CalledF = CI->getCalledFunction();
-        if (CalledF && CalledF->getName().startswith("__fksv")) {
-          cost += 1;
-        } else if (CalledF && CalledF->isIntrinsic()) {
-          cost += 1;
+        if (CalledF) {
+          if (CalledF->getName().startswith("__fksv")) {
+            cost += 4;
+          } else if (CalledF->isIntrinsic()){
+            if (CalledF->getIntrinsicID() == Intrinsic::minnum ||
+                CalledF->getIntrinsicID() == Intrinsic::minimum ||
+                CalledF->getIntrinsicID() == Intrinsic::maxnum ||
+                CalledF->getIntrinsicID() == Intrinsic::maximum) {
+              cost += 30;
+            } else {
+              cost += 2;
+            }
+          } else {
+            cost += 2;
+          }
         } else {
-          cost += 1;
+          cost += 2;
         }
-      } else if (isa<ShuffleVectorInst>(&I)) {
-        cost += 1;
+      } else if (Instruction *BO = dyn_cast<Instruction>(&I)) {
+        auto opCode = BO->getOpcode();
+        if (opCode == Instruction::UDiv || opCode == Instruction::SDiv ||
+            opCode == Instruction::URem || opCode == Instruction::SRem) {
+          cost += 10;
+        } else if (opCode == Instruction::Mul) {
+          cost += 4;
+        } else if (opCode == Instruction::FAdd || opCode == Instruction::FSub ||
+                   opCode == Instruction::FMul) {
+          cost += 30;
+        } else if (opCode == Instruction::FDiv || opCode == Instruction::FRem) {
+          cost += 80;
+        } else if (opCode == Instruction::FNeg) {
+          cost += 2;
+        } else if (opCode == Instruction::BitCast) {
+          cost += 1;
+        } else if (opCode == Instruction::Unreachable ||
+                   opCode == Instruction::Ret) {
+          cost += 0;
+        } else if (opCode ==Instruction::Select) {
+          cost += 4;
+        } else if (opCode == Instruction::InsertElement ||
+                   opCode == Instruction::ExtractElement ||
+                   opCode == Instruction::ShuffleVector) {
+          cost += 4;
+        } else {
+          cost += 2;
+        }
       } else {
-        cost += 1;
+        cost += 2;
       }
     }
   }

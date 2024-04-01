@@ -1,20 +1,8 @@
 #!/usr/bin/env perl
 
+# Copyright (c) 2020-present, author: Zhengyang Liu (liuz@cs.utah.edu).
+# Distributed under the MIT license that can be found in the LICENSE file.
 # borrowed from souper
-
-# Copyright 2014 The Souper Authors. All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 use warnings;
 use strict;
@@ -25,7 +13,7 @@ use Time::HiRes;
 
 my $llvmas  = "@LLVM_BINARY_DIR@/bin/llvm-as";
 my $llvmopt = "@LLVM_BINARY_DIR@/bin/opt";
-my $llvmdis = "@LLVM_BINARY_DIR@/bin/llvm-dis";
+#my $llvmdis = "@LLVM_BINARY_DIR@/bin/llvm-dis";
 
 sub runit ($) {
     my $cmd = shift;
@@ -38,7 +26,7 @@ sub usage() {
 Options:
   -dumpall                            dump all LHSs
   -tofiles                            dump all LHSs to files
-  -sort=timestamp|costdiff|reduce     sort optimizations
+  -sort=timestamp|costdiff|reduce|cutsize    sort optimizations
   -verbose
 END
     exit -1;
@@ -60,7 +48,8 @@ GetOptions(
     ) or usage();
 usage() unless ($SORT eq "timestamp" ||
                 $SORT eq "costdiff" ||
-                $SORT eq "reduce");
+                $SORT eq "reduce" ||
+                $SORT eq "cutsize");
 
 my $noopt_count=0;
 
@@ -75,13 +64,13 @@ my @all_keys = $r->keys('*');
 
 print "; Inspecting ".scalar(@all_keys)." Redis values\n";
 
-sub parse ($) {
+sub parse($) {
     #(my $opt, my $RHS) = @_;
     (my $opt) = @_;
     (my $fh, my $tmpfn) = File::Temp::tempfile();
     print $fh $opt;
     $fh->flush();
-    open INF, "${llvmdis} < $tmpfn 2>&1 |";
+    open INF, "cat < $tmpfn 2>&1 |";
     my $output = "";
     my $success = 0;
     while (my $line = <INF>) {
@@ -99,14 +88,15 @@ sub parse ($) {
 my %toprint;
 my %ir;
 my %rewrite;
-my %oldcost;
-my %newcost;
+my %costafter;
+my %costbefore;
 my %costdiff;
 my %reduce;
 my %timestamp;
 my %fn_name;
 my %noopt;
 my %optbc;
+my %cutsize;
 
 
 if ($DUMPALL) {
@@ -117,6 +107,7 @@ if ($DUMPALL) {
         my $time   = $h{"timestamp"};
         my $fn     = $h{"fn"};
         my $ir     = parse($opt);
+        my $rewrite = $h{"rewrite"};
         if ($TOFILES) {
             open(my $fh, ">", "dump_$count.ll");
             print $fh $ir;
@@ -124,6 +115,7 @@ if ($DUMPALL) {
             close $fh;
         } else {
             print $ir, "\n";
+            print "rewrite: $rewrite\n";
             print "timestamp: $time\n";
             print "in fn: $fn\n";
             print "\n------------------------------------------------------\n";
@@ -148,22 +140,21 @@ foreach my $opt (@all_keys) {
     if ($noopt{$opt}) {
         $noopt_count++;
     } else {
-        my $oc     = $h{"oldcost"};
-        my $nc     = $h{"newcost"};
-        my $obc    = $h{"optimizedbc"};
-        if ($oc == 0) {
-            $oc = 1;
+        my $ca     = $h{"costafter"};
+        my $cb     = $h{"costbefore"};
+        if ($cb == 0) {
+            $cb = 1;
         }
-        if ($nc == 0) {
-            $nc = 1;
+        if ($ca == 0) {
+            $ca = 1;
         }
-        $optbc{$opt} = parse($obc);
         $toprint{$opt} = 1;
-        $oldcost{$opt} = $oc;
-        $newcost{$opt} = $nc;
-        $costdiff{$opt} = $oc - $nc;
-        $reduce{$opt} = ($oc - $nc * 1.0) / $oc;
+        $costafter{$opt} = $ca;
+        $costbefore{$opt} = $cb;
+        $costdiff{$opt} = $cb - $ca;
+        $reduce{$opt} = ($cb - $ca * 1.0) / $cb;
         $rewrite{$opt} = $result;
+        $cutsize{$opt} = length($optbc{$opt});
     }
 }
 
@@ -176,11 +167,14 @@ print "; Discarding ${noopt_count} not-optimizations leaving ".
 sub bytimestamp { $timestamp{$b} <=> $timestamp{$a} }
 sub bycostdiff { $costdiff{$b} <=> $costdiff{$a} }
 sub byreduce { $reduce{$b} <=> $reduce{$a} }
+sub bycutsize { $cutsize{$b} <=> $cutsize{$a} }
 
 my $byx;
 $byx = \&bytimestamp if ($SORT eq "timestamp");
 $byx = \&bycostdiff if ($SORT eq "costdiff");
 $byx = \&byreduce if ($SORT eq "reduce");
+$byx = \&bycutsize if ($SORT eq "cutsize");
+
 
 my $count = 0;
 foreach my $opt (sort $byx keys %toprint) {
@@ -188,28 +182,28 @@ foreach my $opt (sort $byx keys %toprint) {
     my $time = $timestamp{$opt};
     my $fn   = $fn_name{$opt};
     my $rewrite = $rewrite{$opt};
-    my $oc = $oldcost{$opt};
-    my $nc = $newcost{$opt};
-    my $obc = $optbc{$opt};
+    my $ca = $costafter{$opt};
+    my $cb = $costbefore{$opt};
+    # my $obc = $optbc{$opt};
 
     if ($TOFILES) {
         open(my $fh, ">", "dump_$count.src.ll");
         print $fh $ir, "\n";
         $fh->flush();
         close $fh;
-        open($fh, ">", "dump_$count.tgt.ll");
-        print $fh $obc, "\n";
-        $fh->flush();
-        close $fh;
+        # open($fh, ">", "dump_$count.tgt.ll");
+        # print $fh $obc, "\n";
+        # $fh->flush();
+        # close $fh;
     } else {
         print "; src ---------------------------------------------------\n";
         print $ir, "\n";
-        print "; tgt ---------------------------------------------------\n";
-        print $obc, "\n";
+        # print "; tgt ---------------------------------------------------\n";
+        # print $obc, "\n";
         print "; stats -------------------------------------------------\n";
         print "; minotaur_rewrite: $rewrite \n";
-        print "; minotaur_cost-before: $oc\n";
-        print "; minotaur_cost-after: $nc\n";
+        print "; minotaur_cost-before: $cb\n";
+        print "; minotaur_cost-after: $ca\n";
         print "; minotaur_timestamp: $time\n";
         print "; minotaur_fn: $fn\n";
     }

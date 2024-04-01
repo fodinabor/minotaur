@@ -13,6 +13,7 @@
 #include "util/symexec.h"
 #include "tools/transform.h"
 #include "llvm_util/compare.h"
+#include "llvm/ADT/APSInt.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Analysis/ScalarEvolutionExpressions.h"
@@ -63,8 +64,9 @@ bool
 AliveEngine::compareFunctions(llvm::Function &Func1, llvm::Function &Func2) {
   smt::smt_initializer smt_init;
   llvm_util::Verifier verifier(TLI, smt_init, *debug);
-  verifier.quiet = true;
+  verifier.quiet = false;
   verifier.compareFunctions(Func1, Func2);
+
   return verifier.num_correct;
 }
 
@@ -101,11 +103,11 @@ AliveEngine::find_model(Transform &t,
 
   Errors errs;
 
-  for (auto &i : src_state.getFn().getInputs()) {
+  for (auto &i : tgt_state.getFn().getInputs()) {
     if (!dynamic_cast<const Input*>(&i))
       continue;
 
-    auto *val = src_state.at(i);
+    auto *val = tgt_state.at(i);
     if (!val)
       continue;
 
@@ -115,13 +117,13 @@ AliveEngine::find_model(Transform &t,
 
     auto &ty = i.getType();
 
-    if (ty.isIntType()) {
+    if (ty.isIntType() || ty.isFloatType()) {
       qvars.insert(val->val.value);
       continue;
     }
 
-    if (ty.isVectorType() && ty.getAsAggregateType()->getChild(0).isIntType()) {
-      auto aty = ty.getAsAggregateType();
+    auto aty = ty.getAsAggregateType();
+    if (ty.isVectorType() && (aty->getChild(0).isIntType() || aty->getChild(0).isFloatType())) {
       for (unsigned I = 0; I < aty->numElementsConst(); ++I) {
         qvars.insert(aty->extract(val->val, I, false).value);
       }
@@ -191,12 +193,12 @@ AliveEngine::find_model(Transform &t,
   stringstream s;
   auto &m = r.getModel();
   s << ";result\n";
-  for (auto &i : src_state.getFn().getInputs()) {
+  for (auto &i : tgt_state.getFn().getInputs()) {
     if (!dynamic_cast<const Input*>(&i) &&
         !dynamic_cast<const ConstantInput*>(&i))
         continue;
 
-    auto *val = src_state.at(i);
+    auto *val = tgt_state.at(i);
     if (!val)
       continue;
 
@@ -204,7 +206,7 @@ AliveEngine::find_model(Transform &t,
       auto In = dynamic_cast<const Input*>(&i);
       result[In] = m.eval(val->val.value, true);
       s << i << " = ";
-      tools::print_model_val(s, src_state, m, &i, i.getType(), val->val);
+      tools::print_model_val(s, tgt_state, m, &i, i.getType(), val->val);
       s << '\n';
     }
   }
@@ -212,10 +214,27 @@ AliveEngine::find_model(Transform &t,
   return errs;
 }
 
+static const llvm::fltSemantics &getFloatSemantics(unsigned BitWidth) {
+  switch (BitWidth) {
+  default:
+    llvm_unreachable("Unsupported floating-point semantics!");
+    break;
+  case 16:
+    return llvm::APFloat::IEEEhalf();
+  case 32:
+    return llvm::APFloat::IEEEsingle();
+  case 64:
+    return llvm::APFloat::IEEEdouble();
+  case 128:
+    return llvm::APFloat::IEEEquad();
+  }
+}
+
 // call constant synthesizer and fill in constMap if synthesis suceeeds
 bool
 AliveEngine::constantSynthesis(llvm::Function &src, llvm::Function &tgt,
-   unordered_map<const llvm::Argument*, llvm::Constant*>& ConstMap) {
+   unordered_map<llvm::Argument*, llvm::Constant*>& ConstMap) {
+
   std::optional<smt::smt_initializer> smt_init;
   smt_init.emplace();
 
@@ -227,7 +246,7 @@ AliveEngine::constantSynthesis(llvm::Function &src, llvm::Function &tgt,
     return false;
   }
 
-  unordered_map<string, const Argument*> Arguments;
+  unordered_map<string, Argument*> Arguments;
   for (auto &arg : tgt.args()) {
     string ArgName = "%" + string(arg.getName());
     if (ArgName.starts_with("%_reservedc")) {
@@ -239,17 +258,17 @@ AliveEngine::constantSynthesis(llvm::Function &src, llvm::Function &tgt,
   t.src = std::move(*Func1);
   t.tgt = std::move(*Func2);
 
-  unordered_map<const IR::Value*, const Argument*> Inputs;
+  unordered_map<const IR::Value*, Argument*> Inputs;
   for (auto &&I : t.tgt.getInputs()) {
     string InputName = I.getName();
 
-    if (InputName.starts_with("%_reservedc"))
+    if (InputName.starts_with("%_reservedc")) {
       Inputs[&I] = Arguments[InputName];
+    }
   }
 
   // assume type verifies
   std::unordered_map<const IR::Value*, smt::expr> result;
-
   Errors errs = find_model(t, result);
 
   bool ret(errs);
@@ -264,18 +283,33 @@ AliveEngine::constantSynthesis(llvm::Function &src, llvm::Function &tgt,
       IntegerType *ity = cast<IntegerType>(ty);
       ConstMap[I.second] =
         ConstantInt::get(ity, result[I.first].numeral_string(), 10);
+    } else if (ty->isIEEELikeFPTy()) {
+      unsigned bits = ty->getPrimitiveSizeInBits();
+      APInt integer(bits, result[I.first].numeral_string(), 10);
+      APFloat fp(getFloatSemantics(bits), integer);
+
+      ConstMap[I.second] = ConstantFP::get(ty, fp);
     } else if (ty->isVectorTy()) {
       auto flat = result[I.first];
       FixedVectorType *vty = cast<FixedVectorType>(ty);
-      IntegerType *ety = cast<IntegerType>(vty->getElementType());
-
+      auto ety = vty->getElementType();
+      unsigned bits = vty->getScalarSizeInBits();
       SmallVector<llvm::Constant*> v;
       for (int i = vty->getElementCount().getKnownMinValue()-1; i >= 0; i --) {
-        unsigned bits = ety->getBitWidth();
         auto elem = flat.extract((i + 1) * bits - 1, i * bits);
         if (!elem.isConst())
           return false;
-        v.push_back(ConstantInt::get(ety, elem.numeral_string(), 10));
+
+        if (ety->isIntegerTy()) {
+          IntegerType *ety = cast<IntegerType>(vty->getElementType());
+          v.push_back(ConstantInt::get(ety, elem.numeral_string(), 10));
+        } else if (ety->isIEEELikeFPTy()) {
+          APInt integer(bits, elem.numeral_string(), 10);
+          APFloat fp(getFloatSemantics(bits), integer);
+          v.push_back(ConstantFP::get(ety, fp));
+        } else {
+          UNREACHABLE();
+        }
       }
       ConstMap[I.second] = ConstantVector::get(v);
     }

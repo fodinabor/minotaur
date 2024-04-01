@@ -1,18 +1,8 @@
 #!/usr/bin/env perl
 
-# Copyright 2014 The Souper Authors. All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Copyright (c) 2020-present, author: Zhengyang Liu (liuz@cs.utah.edu).
+# Distributed under the MIT license that can be found in the LICENSE file.
+# borrowed from souper
 
 use warnings;
 use strict;
@@ -25,10 +15,7 @@ use BSD::Resource;
 eval { require Sys::CPU; Sys::CPU->import(); };
 
 my $NPROCS = 40;
-$NPROCS = Sys::CPU::cpu_count() if defined(&Sys::CPU::cpu_count);
-
-my $CPU_LIMIT = 15 * 60;
-my $RAM_LIMIT = 4 * 1024 * 1024 * 1024;
+$NPROCS = Sys::CPU::cpu_count() - 2 if defined(&Sys::CPU::cpu_count);
 
 sub usage() {
     print <<"END";
@@ -45,7 +32,7 @@ END
 
 my $tag = "x";
 my $VERBOSE = 0;
-my $SAVE_TEMPS;
+my $SAVE_TEMPS=1;
 my $UNIX = 0;
 
 GetOptions(
@@ -58,7 +45,8 @@ GetOptions(
 
 my $REDISPORT = 6379;
 
-my $MINOTAUR = "@CMAKE_BINARY_DIR@/opt-synthesis-test.sh";
+my $minotaur = "@CMAKE_BINARY_DIR@/infer-cut.sh";
+my $llvmdis = "@LLVM_BINARY_DIR@/bin/llvm-dis";
 
 my $r;
 if ($UNIX) {
@@ -67,71 +55,22 @@ if ($UNIX) {
     $r = Redis->new(server => "localhost:" . $REDISPORT);
 }
 $r->ping || die "no server?";
-my @keys = $r->keys('*');
+my @all_keys = $r->keys('*');
 
 sub infer($) {
-    (my $k) = @_;
+    (my $opt) = @_;
     (my $fh, my $tmpfn) = File::Temp::tempfile();
-    print $fh $k;
-    my $cmd = "";
-    #print STDERR "\n$k\n\n";
+    print $fh $opt;
     $fh->flush();
-    open(my $foo, '>>', 'fail.txt');
 
     my $pid = $$;
-    my $INF;
-    if ($SAVE_TEMPS) {
-        my $OFN;
-        if (1) {
-            $OFN = "tmp_${pid}.log";
-            system "${MINOTAUR} < $tmpfn > $OFN 2>&1";
-            open my $OF, ">>$OFN" or die;
-            #print $OF "\n\n$cmd\n\n";
-            #print $OF "$k\n\n";
-            close $OF;
-        }
-
-        open $INF, "<$OFN" or die;
-    } else {
-        open $INF, "$cmd < $tmpfn |" or print $foo "$k\n";
-    }
-
     my $ok = 0;
-    my $failed = 0;
-    my @lines = <$INF>;
-    for (@lines) {
-        if ($_ =~ /Failed/) {
-            $failed = 1;
-            next;
-        }
-        if ($_ =~ /successfully/) {
-            $ok = 1;
-            next;
-        }
-    }
-    close $INF;
-    close $fh;
+
+    my $OFN = "tmp_${pid}.log";
+    system "${minotaur} -S < $tmpfn > $OFN 2>&1";
+    #nclose $OF;
     unlink $tmpfn;
-
-    my $red;
-    if ($UNIX) {
-	$red = Redis->new(sock => "@CMAKE_BINARY_DIR@/cache.sock");
-    } else {
-	$red = Redis->new(server => "localhost:" . $REDISPORT);
-    }
-    $red->ping || die "no server?";
-    $red->hset($k, "cache-infer-tag" => $tag);
-
-    if ($ok) {
-        open(FH, '>', "rewrite-${pid}") or die $!;
-        for(@lines) {
-          print FH $_;
-        }
-        close(FH);
-        exit 0;
-    } else {
-        exit 1;
-    }
+    exit 0;
 }
 
 my $num_running = 0;
@@ -154,13 +93,6 @@ my $status_cnt;
 my $status_opct;
 my $status_total;
 
-sub reset_status($) {
-    (my $t) = @_;
-    $status_total = $t;
-    $status_opct = 0;
-    $status_cnt = 0;
-}
-
 sub status() {
     print ".";
     $status_cnt++;
@@ -174,72 +106,47 @@ sub status() {
 my $opid = $$;
 my $skip = 0;
 
-reset_status(scalar(@keys)) if $VERBOSE;
+print scalar(@all_keys)." expressions\n";
 
-my %sprofile;
-my %dprofile;
+my $count = 0;
 
-foreach my $opt (@keys) {
-    $sprofile{$opt} = 0;
-    $dprofile{$opt} = 0;
-}
+my %toprint;
+my %ir;
+my %rewrite;
+my %timestamp;
+my %fn_name;
+my %noopt;
 
-foreach my $opt (@keys) {
+foreach my $opt (@all_keys) {
     my %h = $r->hgetall($opt);
-    foreach my $kk (keys %h) {
-        if ($kk =~ /^sprofile (.*)$/) {
-            my $count = $h{$kk};
-            $sprofile{$opt} += $count;
-        }
-        if ($kk =~ /^dprofile (.*)$/) {
-            my $count = $h{$kk};
-            $dprofile{$opt} += $count;
-        }
-    }
+
+    my $result = $h{"rewrite"};
+    my $time   = $h{"timestamp"};
+    my $fn     = $h{"fn"};
+
+    #$ir{$opt} = infer($opt);
+    $toprint{$opt} = 1;
+    $fn_name{$opt} = $fn;
+    $timestamp{$opt} = $time;
 }
 
-my %sprofile_rank;
-my %dprofile_rank;
-
-my $n=0;
-foreach my $opt (sort { $sprofile{$b} <=> $sprofile{$a} } @keys) {
-    $sprofile_rank{$opt} = $n;
-    $n++;
-    # print "$sprofile{$opt} $opt\n\n";
-}
-
-$n=0;
-foreach my $opt (sort { $dprofile{$b} <=> $dprofile{$a} } @keys) {
-    $dprofile_rank{$opt} = $n;
-    $n++;
-    # print "$dprofile{$opt} $opt\n\n";
-}
-
-sub byrank {
-    return
-        ($sprofile_rank{$a} + $dprofile_rank{$a}) <=>
-        ($sprofile_rank{$b} + $dprofile_rank{$b});
-}
-
-$n = 0;
-foreach my $k (sort byrank @keys) {
+foreach my $opt (keys %toprint) {
     status() if $VERBOSE;
-    my $result = $r->hget($k, "cache-infer-tag");
+    my $ir   = $ir{$opt};
     # if (defined $result && $result eq $tag) {
     #     $skip++;
     #     next;
     # }
     wait_for_one() unless $num_running < $NPROCS;
     die unless $num_running < $NPROCS;
-    print("solving $n\n");
-    $n++;
+    print("solving $count\n");
+    $count ++;
     my $pid = fork();
     die unless $pid >= 0;
     if ($pid == 0) {
-	die "setrlimit RSS" unless setrlimit(RLIMIT_RSS, $RAM_LIMIT, $RAM_LIMIT);
-	die "setrlimit VMEM" unless setrlimit(RLIMIT_VMEM, $RAM_LIMIT, $RAM_LIMIT);
-	infer ($k);
-	# not reachable
+        #die "setrlimit RSS" unless setrlimit(RLIMIT_RSS, $RAM_LIMIT, $RAM_LIMIT);
+        #die "setrlimit VMEM" unless setrlimit(RLIMIT_VMEM, $RAM_LIMIT, $RAM_LIMIT);
+        infer ($opt);
     }
     # make sure we're in the parent
     die unless $$ == $opid;

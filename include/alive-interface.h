@@ -29,14 +29,15 @@ private:
     std::unordered_map<const IR::Value*, smt::expr>&);
 
 public:
-  AliveEngine(llvm::TargetLibraryInfoWrapperPass &TLI) : TLI(TLI) {
-    util::config::disable_undef_input = config::disable_undef_input;
-    util::config::disable_poison_input = config::disable_poison_input;
+  AliveEngine(llvm::TargetLibraryInfoWrapperPass &TLI, bool dpi) : TLI(TLI) {
+    util::config::disable_undef_input = true;
+    util::config::disable_poison_input = dpi;
+    util::config::use_exact_fp = dpi;
     debug = config::debug_tv ? &std::cerr : &NOP_OSTREAM;
   }
 
   bool constantSynthesis(llvm::Function&, llvm::Function&,
-    std::unordered_map<const llvm::Argument*, llvm::Constant*>&);
+    std::unordered_map<llvm::Argument*, llvm::Constant*>&);
   bool compareFunctions(llvm::Function&, llvm::Function&);
 };
 

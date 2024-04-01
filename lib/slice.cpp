@@ -1,7 +1,5 @@
 // Copyright (c) 2020-present, author: Zhengyang Liu (liuz@cs.utah.edu).
 // Distributed under the MIT license that can be found in the LICENSE file.
-#include "util/compiler.h"
-#include "util/sort.h"
 #include "config.h"
 #include "slice.h"
 #include "utils.h"
@@ -9,7 +7,9 @@
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/CFG.h"
+#include "llvm/IR/Constant.h"
 #include "llvm/IR/Constants.h"
+#include "llvm/IR/Dominators.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/GlobalValue.h"
 #include "llvm/IR/GlobalVariable.h"
@@ -23,10 +23,9 @@
 #include "llvm/Transforms/Utils/Local.h"
 #include "llvm/Transforms/Utils/ValueMapper.h"
 
+#include <functional>
 #include <optional>
 #include <queue>
-#include <unordered_map>
-#include <unordered_set>
 
 using namespace llvm;
 using namespace std;
@@ -36,48 +35,69 @@ struct debug {
   debug &operator<<(const T &s)
   {
     if (minotaur::config::debug_slicer)
-      llvm::errs()<<s;
+      minotaur::config::dbg()<<s;
     return *this;
   }
 };
 
-
-// place instructions within a basicblock with topology sort
-static bool cmp(const pair<Instruction*, unsigned>& lhs,
-                const pair<Instruction*, unsigned>& rhs) {
-  return lhs.second < rhs.second;
+static bool isUnsupportedTy(llvm::Type *ty) {
+  Type *vsty = ty->getScalarType();
+  return ty->isStructTy() || vsty->isPointerTy() ||
+         (vsty->isFloatingPointTy() && !vsty->isIEEELikeFPTy()) ||
+         ty->isScalableTy() || vsty->isX86_MMXTy() || vsty->isX86_AMXTy();
 }
 
-static vector<Instruction*>
-schedule_insts(vector<pair<Instruction*, unsigned>> &iis) {
-  std::sort(iis.begin(), iis.end(), cmp);
+static bool walk(BasicBlock* current, BasicBlock* target,
+                 set<BasicBlock*> &blocks,
+                 DominatorTree &DT) {
+  auto s = [&DT](auto self,
+                 BasicBlock* current,
+                 BasicBlock* target,
+                 set<BasicBlock*>& visited,
+                 set<BasicBlock*>& result) -> bool {
+    if (visited.size() > 20) {
+      debug() << "[slicer] block too distant from root, skipping\n";
+      return false;
+    }
 
-  vector<Instruction*> sorted_iis;
-  for (auto ii : iis) {
-    sorted_iis.push_back(ii.first);
-  }
-  return sorted_iis;
-}
+    if (target == current) {
+        result.insert(visited.begin(), visited.end());
+        return true;
+    } else {
+      for (BasicBlock* pred : predecessors(current)) {
+        bool t = true;
+        if (visited.find(pred) == visited.end() && DT.dominates(target, pred)) {
+            visited.insert(pred);  // Backtrack
+            t = self(self, pred, target, visited, result);
+            visited.erase(pred);
+        }
+        if (!t)
+          return false;
+      }
+      return true;
+    }
+  };
+  /*debug () << "[slicer] start walking from " << current->getName() << " to "
+           << target->getName() << "\n";*/
 
-static unsigned getInstructionIdx(const Instruction *I) {
-  unsigned idx = 0;
-  for (auto &ii : *(I->getParent())) {
-    if (&ii == I)
-      break;
-    ++idx;
-  }
-  return idx;
+  set<BasicBlock*> visited = { current };
+
+  return s(s, current, target, visited, blocks);
 }
 
 namespace minotaur {
 
 //  * if a external value is outside the loop, and it does not dominates v,
 //    do not extract it
-optional<reference_wrapper<Function>> Slice::extractExpr(Value &v) {
+optional<pair<reference_wrapper<Function>, Instruction*>>
+Slice::extractExpr(Value &v) {
   debug() << "[slicer] slicing value " << v << ">>>\n";
 
-  if (!v.getType()->isIntOrIntVectorTy())
+  Type *vsty = v.getType()->getScalarType();
+  if (isUnsupportedTy(vsty)) {
+    debug() << "[slicer] unsupported type " << *vsty << "\n";
     return nullopt;
+  }
 
   assert(isa<Instruction>(&v) && "Expr to be extracted must be a Instruction");
   Instruction *vi = cast<Instruction>(&v);
@@ -94,17 +114,12 @@ optional<reference_wrapper<Function>> Slice::extractExpr(Value &v) {
   }
 
   LLVMContext &ctx = m->getContext();
-  unordered_set<Value*> visited;
+  set<Value*> visited;
 
-  queue<pair<Value*, unsigned>> worklist;
+  queue<tuple<Value*, unsigned>> worklist;
 
   ValueToValueMapTy vmap;
-  vector<Instruction*> insts;
-  unordered_map<BasicBlock*, vector<pair<Instruction*,unsigned>>> bb_insts;
-  unordered_set<BasicBlock*> blocks;
-
-  // set of predecessor bb a bb depends on
-  unordered_map<BasicBlock *, unordered_set<BasicBlock *>> bb_deps;
+  set<Instruction*> insts;
 
   worklist.push({&v, 0});
 
@@ -118,12 +133,11 @@ optional<reference_wrapper<Function>> Slice::extractExpr(Value &v) {
     auto &[w, depth] = worklist.front();
     worklist.pop();
 
-    if (depth > config::slicer_max_depth)
+    if (depth >= config::slicer_max_depth)
       continue;
 
     if (!visited.insert(w).second)
       continue;
-
 
     if (Instruction *i = dyn_cast<Instruction>(w)) {
       BasicBlock *ibb = i->getParent();
@@ -132,6 +146,11 @@ optional<reference_wrapper<Function>> Slice::extractExpr(Value &v) {
       // do not harvest instructions beyond loop boundry.
       if (loopi != loopv)
         continue;
+
+      if (loopi && !loopi->isLoopSimplifyForm()) {
+        debug() << "[slicer] loop is not in simplified form, skipping\n";
+        continue;
+      }
 
       auto ops = i->operands();
 
@@ -156,13 +175,22 @@ optional<reference_wrapper<Function>> Slice::extractExpr(Value &v) {
         ops = call->args();
       } else if (auto phi = dyn_cast<PHINode>(i)) {
         bool phiHasUnknownIncome = false;
-        unsigned incomes = phi->getNumIncomingValues();
-        for (unsigned i = 0; i < incomes; i++) {
-          BasicBlock *block = phi->getIncomingBlock(i);
-          Loop *loopphi = LI.getLoopFor(block);
-          if (loopphi != loopv) {
-            phiHasUnknownIncome = true;
-            break;
+        if (ibb != vbb) {
+          debug() << "[slicer] phi node is not in the same block as the value\n";
+          phiHasUnknownIncome = true;
+        } else {
+          unsigned incomes = phi->getNumIncomingValues();
+          for (unsigned i = 0; i < incomes; i++) {
+            BasicBlock *block = phi->getIncomingBlock(i);
+            Loop *loopphi = LI.getLoopFor(block);
+            if (loopphi != loopv) {
+              phiHasUnknownIncome = true;
+              break;
+            }
+            if (visited.count(phi->getIncomingValue(i))) {
+              phiHasUnknownIncome = true;
+              break;
+            }
           }
         }
         // if a phi node has unknown income, do not harvest
@@ -170,75 +198,45 @@ optional<reference_wrapper<Function>> Slice::extractExpr(Value &v) {
           debug() << "[slicer]" << *phi << " has external or constant income\n";
           continue;
         }
-      } else if (auto LI = dyn_cast<LoadInst>(i)) {
-          continue;
-          /*auto dep = MD.getDependency(LI);
-          if (dep.isDef() || dep.isClobber()) {
-            auto st = dep.getInst();
-
-            if (st->getParent() == ibb) {
-              insts.push_back(st);
-              bb_insts[ibb].push_back({st, getInstructionIdx(st)});
-            }
-          }*/
-        }
+      }
 
       // filter unknown operation by operand type
       bool haveUnknownOperand = false;
       for (auto &op : ops) {
+        if (isa<GlobalValue>(op)) {
+          debug() << "[slicer] found instruction that uses GlobalValue\n";
+          haveUnknownOperand = true;
+          break;
+        }
         if (isa<ConstantExpr>(op)) {
           debug() << "[slicer] found instruction that uses ConstantExpr\n";
           haveUnknownOperand = true;
           break;
         }
+        // give up <i31 34, i31 ptrtoint (ptr @external_global to i31)>
+        if (auto c = dyn_cast<Constant>(op)) {
+          if (c->containsConstantExpression()) {
+            haveUnknownOperand = true;
+            break;
+          }
+        }
         auto op_ty = op->getType();
-        if (op_ty->isStructTy() || op_ty->isFloatingPointTy() ||
-            op_ty->isPointerTy()) {
+        if (isUnsupportedTy(op_ty)) {
           debug() << "[slicer] found instruction with operands with type "
                   << *op_ty <<"\n";
           haveUnknownOperand = true;
           break;
         }
       }
-
       if (haveUnknownOperand) {
         continue;
       }
 
-      insts.push_back(i);
-      bb_insts[ibb].push_back({i, getInstructionIdx(i)});
-
-      bool never_visited = blocks.insert(ibb).second;
-
-      // add condition to worklist
-      if (ibb != vbb && never_visited) {
-        Instruction *term = ibb->getTerminator();
-        if(!isa<BranchInst>(term)) {
-          debug() << "found non branch terminator " << *term << ", skipping\n";
-          return nullopt;
-        }
-        BranchInst *bi = cast<BranchInst>(term);
-        if (bi->isConditional()) {
-          if (Instruction *c = dyn_cast<Instruction>(bi->getCondition())) {
-            BasicBlock *cbb = cast<Instruction>(c)->getParent();
-            bb_deps[ibb].insert(cbb);
-            worklist.push({c, depth + 1});
-          }
-        }
-      }
-
-      if (PHINode *phi = dyn_cast<PHINode>(i)) {
-        for (auto income : phi->blocks()) {
-          bb_deps[ibb].insert(income);
-        }
-      }
+      insts.insert(i);
 
       for (auto &op : i->operands()) {
         if (!isa<Instruction>(op))
           continue;
-
-        BasicBlock *opbb = cast<Instruction>(op)->getParent();
-        bb_deps[ibb].insert(opbb);
         worklist.push({op, depth + 1});
       }
     } else {
@@ -248,62 +246,88 @@ optional<reference_wrapper<Function>> Slice::extractExpr(Value &v) {
 
   // if no instructions satisfied the criteria of cloning, return null.
   if (insts.empty()) {
-    debug() << "[slicer] no instruction can be harvested, skipping\n";
+    debug() << "[slicer] no eligible instruction can be harvested, skipping\n";
     return nullopt;
   }
 
-  // pass 2
-  // + find missed intermidiate blocks
-  // For example,
-  /*
-         S
-        / \
-       A   B
-       |   |
-       |   I
-        \  /
-         T
-  */
-  // Suppose an instruction in T uses values defined in A and B, if we harvest
-  // values by simply backward-traversing def/use tree, Block I will be missed.
-  // To solve this issue,  we identify all such missed block by searching.
-  // TODO: better object management.
-  auto search = [](auto self,
-                   BasicBlock* current,
-                   BasicBlock* target,
-                   unordered_set<BasicBlock*>& visited,
-                   vector<BasicBlock*>& currentPath,
-                   unordered_set<BasicBlock*>& result) -> void {
-
-    // Add current block to the path
-    currentPath.push_back(current);
-
-    // If we reach the target block, add all blocks in currentPath to the result
-    if (target == current) {
-        result.insert(currentPath.begin(), currentPath.end());
-    } else {
-      for (BasicBlock* pred : predecessors(current)) {
-          if (visited.find(pred) == visited.end()) {
-              visited.insert(pred);
-              self(self, pred, target, visited, currentPath, result);
-              visited.erase(pred);  // Backtrack
-          }
+  set<BasicBlock*> blocks;
+  blocks.insert(vbb);
+  map<BasicBlock*, set<BasicBlock*>> bb_deps;
+  for (auto i : insts) {
+    blocks.insert(i->getParent());
+    // incoming block -> def block
+    if (auto *phi = dyn_cast<PHINode>(i)) {
+      for (unsigned i = 0; i < phi->getNumIncomingValues(); i++) {
+        BasicBlock *incomebb = phi->getIncomingBlock(i);
+        blocks.insert(incomebb);
+        Value *incomev = phi->getIncomingValue(i);
+        if (!isa<Instruction>(incomev))
+          continue;
+        Instruction *incomei = cast<Instruction>(incomev);
+        if (!insts.count(incomei))
+          continue;
+        if (incomebb == incomei->getParent())
+          continue;
+        bb_deps[incomebb].insert(incomei->getParent());
       }
-    }
-
-    // Remove the current block from the path (backtrack)
-    currentPath.pop_back();
-  };
-
-  for (auto &[bb, deps] : bb_deps) {
-    unordered_set<BasicBlock*> visited;
-    vector<BasicBlock*> currentPath;
-    for (auto *dep : deps) {
-      search(search, bb, dep, visited, currentPath, blocks);
+    } else {
+      // use block -> def block
+      for (auto &op : i->operands()) {
+        if (!isa<Instruction>(op))
+          continue;
+        Instruction *op_i = cast<Instruction>(op);
+        if (!insts.count(op_i))
+          continue;
+        if (op_i->getParent() == i->getParent())
+          continue;
+        bb_deps[i->getParent()].insert(op_i->getParent());
+      }
     }
   }
 
-  // FIXME: Do not handle switch for now
+  // cond -> def block
+  for (BasicBlock *bb : blocks) {
+    Instruction *term = bb->getTerminator();
+
+    if (!isa<BranchInst>(term))
+      continue;
+    BranchInst *bi = cast<BranchInst>(term);
+
+    if (!bi->isConditional())
+      continue;
+
+    Value *cond = bi->getCondition();
+
+    if (!isa<Instruction>(cond))
+      continue;
+    Instruction *cond_i = cast<Instruction>(cond);
+    BasicBlock *cond_bb = cond_i->getParent();
+    if (insts.contains(cond_i) && cond_bb != bb) {
+      bb_deps[bb].insert(cond_bb);
+    }
+  }
+
+  for(auto &[from, tos] : bb_deps) {
+    for (auto to : tos) {
+      debug() << "[slicer] walking from " << from->getName() << " to "
+              << to->getName() << "\n";
+      if (!walk(from, to, blocks, DT)) {
+        return nullopt;
+      }
+    }
+  }
+
+  debug () << "[slicer] " << insts.size() << " instructions are harvested\n";
+  for (auto &i : insts) {
+    debug() << "[slicer] harvested instruction " << *i << "\n";
+  }
+
+  for (auto &bb : blocks) {
+    debug () << "[slicer] harvested block " << bb->getName() << "\n";
+  }
+
+
+  // pass 2
   for (BasicBlock *orig_bb : blocks) {
     Instruction *term = orig_bb->getTerminator();
     if (!isa<BranchInst>(term) && !isa<ReturnInst>(term))
@@ -320,19 +344,13 @@ optional<reference_wrapper<Function>> Slice::extractExpr(Value &v) {
     }
   }
 
+  unsigned name_count = 0;
   // clone instructions
   vector<Instruction *> cloned_insts;
-  unordered_set<Value *> inst_set(insts.begin(), insts.end());
   for (auto inst : insts) {
     Instruction *c = inst->clone();
     vmap[inst] = c;
     mapping[c] = inst;
-    c->setValueName(nullptr);
-    SmallVector<std::pair<unsigned, MDNode *>, 8> ClonedMeta;
-    c->getAllMetadata(ClonedMeta);
-    for (size_t i = 0; i < ClonedMeta.size(); ++i) {
-      c->setMetadata(ClonedMeta[i].first, NULL);
-    }
     cloned_insts.push_back(c);
   }
 
@@ -341,13 +359,13 @@ optional<reference_wrapper<Function>> Slice::extractExpr(Value &v) {
   BasicBlock *sinkbb = BasicBlock::Create(ctx, "sink");
   new UnreachableInst(ctx, sinkbb);
 
-  unordered_set<BasicBlock *> cloned_blocks;
-  unordered_map<BasicBlock *, BasicBlock *> bmap;
+  set<BasicBlock *> cloned_blocks;
+  map<BasicBlock *, BasicBlock *> bmap;
   {
     // pass 3.1.1;
     // + duplicate BB;
     for (BasicBlock *orig_bb : blocks) {
-      BasicBlock *bb = BasicBlock::Create(ctx, orig_bb->getName());
+      BasicBlock *bb = BasicBlock::Create(ctx);
       bmap[orig_bb] = bb;
       vmap[orig_bb] = bb;
       cloned_blocks.insert(bb);
@@ -355,15 +373,20 @@ optional<reference_wrapper<Function>> Slice::extractExpr(Value &v) {
 
     // pass 3.1.2:
     // + put in instructions
-    for (auto bis : bb_insts) {
-      auto is = schedule_insts(bis.second);
-      for (Instruction *inst : is) {
-        if (isa<BranchInst>(inst))
+    for (auto &bb : f) {
+      for (auto &i : bb) {
+        if (!insts.count(&i))
           continue;
-        BasicBlock *bb = bmap.at(bis.first);
-        cast<Instruction>(vmap[inst])->insertInto(bb, bb->end());
+        BasicBlock *bb = bmap.at(i.getParent());
+        cast<Instruction>(vmap[&i])->insertInto(bb, bb->end());
+        string name;
+        raw_string_ostream ss(name);
+        ss << "__n" << name_count++;
+        ss.flush();
+        vmap[&i]->setName(name);
       }
     }
+
     // pass 3.1.2:
     // + wire branch
     for (BasicBlock *orig_bb : blocks) {
@@ -397,7 +420,7 @@ optional<reference_wrapper<Function>> Slice::extractExpr(Value &v) {
           jumpbb = bmap.at(bi->getSuccessor(0));
         cloned_bi = BranchInst::Create(jumpbb, bmap.at(orig_bb));
       }
-      insts.push_back(bi);
+      insts.insert(bi);
       cloned_insts.push_back(cloned_bi);
       //bb_insts[orig_bb].push_back(bi);
       vmap[bi] = cloned_bi;
@@ -412,8 +435,8 @@ optional<reference_wrapper<Function>> Slice::extractExpr(Value &v) {
   // pass 4;
   // + remap the operands of duplicated instructions with vmap from pass 1
   // + if a operand value is unknown, reserve a function parameter for it
-  SmallVector<Type *, 4> argTys;
-  DenseMap<Value *, unsigned> argMap;
+  vector<Type *> argTys;
+  map<Value *, unsigned> argMap;
   unsigned idx = 0;
   for (auto &i : cloned_insts) {
     RemapInstruction(i, vmap, RF_IgnoreMissingLocals);
@@ -423,8 +446,6 @@ optional<reference_wrapper<Function>> Slice::extractExpr(Value &v) {
           continue;
         argTys.push_back(op->getType());
         argMap[op.get()] = idx++;
-      } else if (isa<Constant>(op)) {
-        continue;
       } else if (Instruction *op_i = dyn_cast<Instruction>(op)) {
         auto unknown = find(cloned_insts.begin(), cloned_insts.end(), op_i);
         if (unknown != cloned_insts.end())
@@ -437,21 +458,27 @@ optional<reference_wrapper<Function>> Slice::extractExpr(Value &v) {
       }
     }
   }
+  argTys.push_back(Type::getInt16Ty(ctx));
 
-  unordered_set<BasicBlock *> block_without_preds;
+  set<BasicBlock *> block_without_preds;
   for (auto block : cloned_blocks) {
     auto preds = predecessors(block);
     if (preds.empty()) {
       block_without_preds.insert(block);
     }
   }
-  if (block_without_preds.size() > 1)
-    // argument for switch
-    argTys.push_back(Type::getInt8Ty(ctx));
 
   // create function
   Function *F = Function::Create(FunctionType::get(v.getType(), argTys, false),
-                                 GlobalValue::ExternalLinkage, "rewrite", *m);
+                                 GlobalValue::ExternalLinkage, "cut", *m);
+
+  for (auto &arg : F->args()) {
+    string name;
+    raw_string_ostream ss(name);
+    ss << "__n" << name_count++;
+    ss.flush();
+    arg.setName(name);
+  }
 
   // pass 5:
   // + replace the use of unknown value with the function parameter
@@ -465,47 +492,45 @@ optional<reference_wrapper<Function>> Slice::extractExpr(Value &v) {
     }
   }
 
-  BasicBlock *entry = nullptr;
-  if (block_without_preds.size() == 0) {
+  if (block_without_preds.empty()) {
     report_fatal_error("[slicer] no entry block found, terminating\n");
-  } if (block_without_preds.size() == 1) {
-    entry = *block_without_preds.begin();
-    entry->insertInto(F);
-    for (auto &I : make_early_inc_range(*entry)) {
+  }
+
+  for (auto bb : block_without_preds) {
+    for (auto &I : make_early_inc_range(*bb)) {
       if (PHINode *phi = dyn_cast<PHINode>(&I)) {
         phi->replaceAllUsesWith(PoisonValue::get(phi->getType()));
         phi->eraseFromParent();
       }
     }
-    for (auto block : cloned_blocks) {
-      if (block == entry)
-        continue;
-      block->insertInto(F);
-    }
-  } else {
+  }
+
+  BasicBlock *entry = nullptr;
+  if (block_without_preds.size() > 1) {
     entry = BasicBlock::Create(ctx, "entry");
     SwitchInst *sw = SwitchInst::Create(F->getArg(idx), sinkbb, 1, entry);
-    unsigned idx  = 0;
+    unsigned idx  = 23;
     for (BasicBlock *no_pred : block_without_preds) {
-      sw->addCase(ConstantInt::get(IntegerType::get(ctx, 8), idx ++), no_pred);
+      sw->addCase(ConstantInt::get(IntegerType::get(ctx, 16), idx ++), no_pred);
     }
-    entry->insertInto(F);
-    for (auto block : cloned_blocks) {
-      block->insertInto(F);
+  }
+  else if (block_without_preds.size() == 1) {
+    entry = *block_without_preds.begin();
+  } else {
+    report_fatal_error("[slicer] no entry block found, terminating\n");
+  }
+
+  entry->insertInto(F);
+
+  for (auto &bb : f) {
+    if (bmap.count(&bb)) {
+      BasicBlock *nb = bmap[&bb];
+      if (nb == entry)
+        continue;
+      nb->insertInto(F);
     }
   }
 
-/*
-  for (auto bb : blocks) {
-    if (bmap[bb] == entry)
-      continue;
-    for(BasicBlock *pred : predecessors(bb)) {
-      if (!blocks.count(pred)) {
-        report_fatal_error("[slicer] dangling basicblock\n");
-      }
-    }
-  }
-  */
   sinkbb->insertInto(F);
 
   DominatorTree FDT = DominatorTree();
@@ -523,13 +548,15 @@ optional<reference_wrapper<Function>> Slice::extractExpr(Value &v) {
   raw_string_ostream err_stream(err);
   bool illformed = verifyFunction(*F, &err_stream);
   if (illformed) {
-    debug() << err << "\n" << *F;
+    llvm::errs() << err << "\n" << *F;
     report_fatal_error("[slicer] illformed function generated, terminating\n");
   }
 
   debug()<< *F << "\n" << "<<< end of %" << v.getName() << " <<<\n";
 
-  return optional<reference_wrapper<Function>>(*F);
+
+  return pair<reference_wrapper<Function>, Instruction*>(*F,
+    cast<Instruction>(vmap[&v]));
 }
 
 } // namespace minotaur

@@ -43,15 +43,39 @@ include(AddLLVM)
 include_directories(${LLVM_INCLUDE_DIRS})
 add_definitions(${LLVM_DEFINITIONS})
 
+
+find_package(Git REQUIRED)
+add_custom_command(
+  OUTPUT "${PROJECT_BINARY_DIR}/minotaur_gen.h.tmp"
+  COMMAND "${CMAKE_COMMAND}" -E echo_append "#define MINOTAUR_VERSION_MACRO " > "${PROJECT_BINARY_DIR}/minotaur_gen.h.tmp"
+  COMMAND "${GIT_EXECUTABLE}" describe --tags --dirty --always >> "${PROJECT_BINARY_DIR}/minotaur_gen.h.tmp"
+  WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+  VERBATIM
+)
+add_custom_command(
+  DEPENDS "${PROJECT_BINARY_DIR}/minotaur_gen.h.tmp"
+  OUTPUT "${PROJECT_BINARY_DIR}/minotaur_gen.h"
+  COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${PROJECT_BINARY_DIR}/minotaur_gen.h.tmp" "${PROJECT_BINARY_DIR}/minotaur_gen.h"
+  COMMAND "${CMAKE_COMMAND}" -E remove -f "${PROJECT_BINARY_DIR}/minotaur_gen.h.tmp"
+  WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+  VERBATIM
+)
+add_custom_target(
+  generate_version ALL
+  DEPENDS "${PROJECT_BINARY_DIR}/minotaur_gen.h"
+  WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+)
+
+include_directories(include)
+include_directories(${PROJECT_BINARY_DIR})
+
 list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake")
 
 find_package(Alive2)
 include_directories(${ALIVE2_SOURCE_DIR})
 
-include_directories(include)
 set(SYNTHESIZER_SRC
   "lib/alive-interface.cpp"
-  "lib/config.cpp"
   "lib/enumerator.cpp"
   "lib/expr.cpp"
   "lib/codegen.cpp"
@@ -60,12 +84,11 @@ set(SYNTHESIZER_SRC
   "${PROJECT_BINARY_DIR}/lexer/lexer.cpp"
 )
 
-
 find_package(Z3 4.8.5 REQUIRED)
 
 find_path(HIREDIS_INCLUDE_DIR
   NAMES
-  hiredis/hiredis.h)
+  "hiredis/hiredis.h")
 
 find_library(HIREDIS_LIBRARY
   NAMES
@@ -76,31 +99,29 @@ include_directories(${HIREDIS_INCLUDE_DIR}/hiredis)
 llvm_map_components_to_libnames(LLVM_LIBS
   analysis core irreader passes scalaropts support transformutils targetparser)
 
-add_library(cost STATIC "lib/cost.cpp")
+add_library(cost STATIC "lib/cost.cpp"
+                        "${PROJECT_BINARY_DIR}/cost-command.h")
 target_link_libraries(cost PRIVATE ${LLVM_LIBS})
 
 add_library(utils STATIC "lib/utils.cpp")
 target_link_libraries(utils PRIVATE ${LLVM_LIBS} ${HIREDIS_LIBRARY})
 
-add_library(slice STATIC "lib/config.cpp"
-                         "lib/slice.cpp"
-                         "lib/removal-slice.cpp")
-target_link_libraries(slice PRIVATE utils)
+add_library(config STATIC "lib/config.cpp"
+                         "${PROJECT_BINARY_DIR}/minotaur_gen.h")
+add_dependencies(config generate_version)
+
+add_library(slice STATIC "lib/slice.cpp")
+target_link_libraries(slice PRIVATE utils config)
 
 add_library(synthesizer STATIC ${SYNTHESIZER_SRC})
-target_link_libraries(synthesizer PRIVATE utils cost)
+target_link_libraries(synthesizer PRIVATE utils cost config)
 
-add_llvm_library(online MODULE pass/online.cpp)
+add_llvm_library(online MODULE "pass/online.cpp")
 
 target_link_libraries(online
   PRIVATE synthesizer slice ${ALIVE_LIBS} ${Z3_LIBRARIES} ${LLVM_LIBS}
   $<$<AND:$<CXX_COMPILER_ID:GNU>,$<VERSION_LESS:$<CXX_COMPILER_VERSION>,9.0>>:stdc++fs>)
 
-add_llvm_library(cache-exprs MODULE pass/cache-exprs.cpp)
-
-target_link_libraries(cache-exprs
-  PRIVATE slice ${HIREDIS_LIBRARY}
-  $<$<AND:$<CXX_COMPILER_ID:GNU>,$<VERSION_LESS:$<CXX_COMPILER_VERSION>,9.0>>:stdc++fs>)
 
 add_llvm_executable(minotaur-cs "tools/minotaur-cs.cpp")
 
@@ -108,22 +129,17 @@ target_link_libraries(minotaur-cs
   PRIVATE synthesizer ${ALIVE_LIBS} ${LLVM_LIBS} ${Z3_LIBRARIES}
   $<$<AND:$<CXX_COMPILER_ID:GNU>,$<VERSION_LESS:$<CXX_COMPILER_VERSION>,9.0>>:stdc++fs>)
 
-add_llvm_executable(slice-ir "tools/slice-ir.cpp")
+add_llvm_executable(minotaur-slice "tools/minotaur-slice.cpp")
 
-target_link_libraries(slice-ir
+target_link_libraries(minotaur-slice
   PRIVATE slice ${ALIVE_LIBS}
   $<$<AND:$<CXX_COMPILER_ID:GNU>,$<VERSION_LESS:$<CXX_COMPILER_VERSION>,9.0>>:stdc++fs>)
 
-
-if(BUILD_PARSER_TEST)
-  add_llvm_executable(parse-tests
-    unit-tests/parse-tests.cpp
-  )
-  set(GTEST_LIBS "-lgtest_main -lgtest -lpthread")
-  target_link_libraries(parse-tests
-    PRIVATE synthesizer ${GTEST_LIBS} ${ALIVE_LIBS} ${Z3_LIBRARIES}
-    $<$<AND:$<CXX_COMPILER_ID:GNU>,$<VERSION_LESS:$<CXX_COMPILER_VERSION>,9.0>>:stdc++fs>)
-endif(BUILD_PARSER_TEST)
+add_llvm_executable(parse-tests "unit-tests/parse-tests.cpp")
+set(GTEST_LIBS "-lgtest_main -lgtest -lpthread")
+target_link_libraries(parse-tests
+  PRIVATE synthesizer ${GTEST_LIBS} ${Z3_LIBRARIES}
+  $<$<AND:$<CXX_COMPILER_ID:GNU>,$<VERSION_LESS:$<CXX_COMPILER_VERSION>,9.0>>:stdc++fs>)
 
 if(APPLE)
     set_target_properties(online PROPERTIES
@@ -132,60 +148,61 @@ if(APPLE)
     set_target_properties(minotaur-cs PROPERTIES
         LINK_FLAGS "-undefined dynamic_lookup"
     )
-    set_target_properties(slice-ir PROPERTIES
-        LINK_FLAGS "-undefined dynamic_lookup"
-    )
-    set_target_properties(cache-exprs PROPERTIES
+    set_target_properties(minotaur-slice PROPERTIES
         LINK_FLAGS "-undefined dynamic_lookup"
     )
 endif(APPLE)
 
-set(CACHE_EXPRS_PASS ${CMAKE_BINARY_DIR}/cache-exprs${CMAKE_SHARED_LIBRARY_SUFFIX})
 set(ONLINE_PASS ${CMAKE_BINARY_DIR}/online${CMAKE_SHARED_LIBRARY_SUFFIX})
 
 configure_file(
-  ${PROJECT_SOURCE_DIR}/include/cost-command.h.in
-  ${PROJECT_SOURCE_DIR}/include/cost-command.h
+  "${PROJECT_SOURCE_DIR}/include/cost-command.h.in"
+  "${PROJECT_BINARY_DIR}/cost-command.h"
   @ONLY
 )
 configure_file(
-  ${PROJECT_SOURCE_DIR}/scripts/opt-synthesis.sh.in
-  ${PROJECT_BINARY_DIR}/opt-synthesis-test.sh
+  "${PROJECT_SOURCE_DIR}/scripts/opt-minotaur.sh.in"
+  "${PROJECT_BINARY_DIR}/opt-minotaur.sh"
   @ONLY
 )
 configure_file(
-  ${PROJECT_SOURCE_DIR}/scripts/slice-cc.in
-  ${PROJECT_BINARY_DIR}/slice-cc
+  "${PROJECT_SOURCE_DIR}/scripts/infer-cut.sh.in"
+  "${PROJECT_BINARY_DIR}/infer-cut.sh"
   @ONLY
 )
 configure_file(
-  ${PROJECT_SOURCE_DIR}/scripts/slice-cc.in
-  ${PROJECT_BINARY_DIR}/slice-c++
+  "${PROJECT_SOURCE_DIR}/scripts/slice-cc.in"
+  "${PROJECT_BINARY_DIR}/slice-cc"
   @ONLY
 )
 configure_file(
-  ${PROJECT_SOURCE_DIR}/scripts/minotaur-cc.in
-  ${PROJECT_BINARY_DIR}/minotaur-cc
+  "${PROJECT_SOURCE_DIR}/scripts/slice-cc.in"
+  "${PROJECT_BINARY_DIR}/slice-c++"
   @ONLY
 )
 configure_file(
-  ${PROJECT_SOURCE_DIR}/scripts/minotaur-cc.in
-  ${PROJECT_BINARY_DIR}/minotaur-c++
+  "${PROJECT_SOURCE_DIR}/scripts/minotaur-cc.in"
+  "${PROJECT_BINARY_DIR}/minotaur-cc"
   @ONLY
 )
 configure_file(
-  ${PROJECT_SOURCE_DIR}/scripts/cache-dump.in
-  ${PROJECT_BINARY_DIR}/cache-dump
+  "${PROJECT_SOURCE_DIR}/scripts/minotaur-cc.in"
+  "${PROJECT_BINARY_DIR}/minotaur-c++"
   @ONLY
 )
 configure_file(
-  ${PROJECT_SOURCE_DIR}/scripts/cache-infer.in
-  ${PROJECT_BINARY_DIR}/cache-infer
+  "${PROJECT_SOURCE_DIR}/scripts/cache-dump.in"
+  "${PROJECT_BINARY_DIR}/cache-dump"
   @ONLY
 )
 configure_file(
-  ${PROJECT_SOURCE_DIR}/scripts/get-cost.in
-  ${PROJECT_BINARY_DIR}/get-cost
+  "${PROJECT_SOURCE_DIR}/scripts/cache-infer.in"
+  "${PROJECT_BINARY_DIR}/cache-infer"
+  @ONLY
+)
+configure_file(
+  "${PROJECT_SOURCE_DIR}/scripts/get-cost.in"
+  "${PROJECT_BINARY_DIR}/get-cost"
   @ONLY
 )
 

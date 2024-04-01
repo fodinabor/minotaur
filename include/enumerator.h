@@ -25,7 +25,7 @@ using Sketch = std::pair<Inst*, std::set<ReservedConst*>>;
 class Enumerator {
   std::vector<std::unique_ptr<Inst>> exprs;
 
-  std::set<Var*> values;
+  std::vector<Var*> values;
 
   void findInputs(llvm::Function&,
                   llvm::Instruction*,
@@ -33,7 +33,7 @@ class Enumerator {
   bool getSketches(llvm::Value *V,
                    std::vector<Sketch>&);
 public:
-  std::optional<Rewrite> synthesize(llvm::Function &F1);
+  std::vector<Rewrite> solve(llvm::Function&, llvm::Instruction*);
 };
 
 }
