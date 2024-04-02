@@ -50,16 +50,16 @@ sub getenv($) {
 }
 
 if (getenv("MINOTAUR_DEBUG_SLICER")) {
-  push @ARGV, ("-mllvm", "-minotaur-debug-slicer");
-  push @ARGV, ("-mllvm", "-minotaur-no-infer");
+  push @ARGV, ("-mllvm", "-minotaur-debug-slicer") unless $minotaur == 1;
+  push @ARGV, ("-mllvm", "-minotaur-no-infer") unless $minotaur == 1;
 }
 
 if (getenv("MINOTAUR_DEBUG")) {
-  push @ARGV, ("-mllvm", "-minotaur-debug-enumerator");
+  push @ARGV, ("-mllvm", "-minotaur-debug-enumerator") unless $minotaur == 1;
 }
 
 if (getenv("MINOTAUR_NO_INFER")) {
-  push @ARGV, ("-mllvm", "-minotaur-no-infer");
+  push @ARGV, ("-mllvm", "-minotaur-no-infer") unless $minotaur == 1;
 }
 
 exec @ARGV;
