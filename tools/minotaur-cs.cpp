@@ -129,7 +129,7 @@ int main(int argc, char **argv) {
     report_fatal_error("could not find function in tgt");
 
   auto check_name = [](Argument &A) {
-    return A.getName().startswith("_reservedc");
+    return A.getName().starts_with("_reservedc");
   };
   if (!any_of(SRC->args(), check_name))
     report_fatal_error("could not find reservedconst argument in src");
