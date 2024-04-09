@@ -104,7 +104,7 @@ unsigned get_approx_cost(llvm::Function *F) {
       } else if (CallInst *CI = dyn_cast<CallInst>(&I)) {
         auto CalledF = CI->getCalledFunction();
         if (CalledF) {
-          if (CalledF->getName().startswith("__fksv")) {
+          if (CalledF->getName().starts_with("__fksv")) {
             cost += 4;
           } else if (CalledF->isIntrinsic()){
             if (CalledF->getIntrinsicID() == Intrinsic::minnum ||

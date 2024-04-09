@@ -887,7 +887,7 @@ push:
           auto callee = CI->getCalledFunction();
           if(!callee)
             continue;
-          if (!callee->getName().startswith("__fksv"))
+          if (!callee->getName().starts_with("__fksv"))
             continue;
 
           auto shuf = new llvm::ShuffleVectorInst(CI->getArgOperand(0),
