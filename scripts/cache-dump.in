@@ -132,30 +132,32 @@ foreach my $opt (@all_keys) {
     my $time   = $h{"timestamp"};
     my $fn     = $h{"fn"};
 
+    $noopt{$opt} = $result eq "<no-sol>";
+
+    if ($noopt{$opt}) {
+        $noopt_count++;
+        next;
+    }
+
     $ir{$opt} = parse($opt);
     $fn_name{$opt} = $fn;
     $timestamp{$opt} = $time;
 
-    $noopt{$opt} = $result eq "<no-sol>";
-    if ($noopt{$opt}) {
-        $noopt_count++;
-    } else {
-        my $ca     = $h{"costafter"};
-        my $cb     = $h{"costbefore"};
-        if ($cb == 0) {
-            $cb = 1;
-        }
-        if ($ca == 0) {
-            $ca = 1;
-        }
-        $toprint{$opt} = 1;
-        $costafter{$opt} = $ca;
-        $costbefore{$opt} = $cb;
-        $costdiff{$opt} = $cb - $ca;
-        $reduce{$opt} = ($cb - $ca * 1.0) / $cb;
-        $rewrite{$opt} = $result;
-        $cutsize{$opt} = length($optbc{$opt});
+    my $ca     = $h{"costafter"};
+    my $cb     = $h{"costbefore"};
+    if ($cb == 0) {
+        $cb = 1;
     }
+    if ($ca == 0) {
+        $ca = 1;
+    }
+    $toprint{$opt} = 1;
+    $costafter{$opt} = $ca;
+    $costbefore{$opt} = $cb;
+    $costdiff{$opt} = $cb - $ca;
+    $reduce{$opt} = ($cb - $ca * 1.0) / $cb;
+    $rewrite{$opt} = $result;
+    $cutsize{$opt} = length($optbc{$opt});
 }
 
 
