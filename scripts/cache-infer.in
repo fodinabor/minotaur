@@ -106,9 +106,9 @@ sub status() {
 my $opid = $$;
 my $skip = 0;
 
-print scalar(@all_keys)." expressions\n";
+print "total expressions = ".scalar(@all_keys)."\n";
 
-my $count = 0;
+my $count = 1;
 
 my %toprint;
 my %ir;
@@ -139,7 +139,7 @@ foreach my $opt (keys %toprint) {
     # }
     wait_for_one() unless $num_running < $NPROCS;
     die unless $num_running < $NPROCS;
-    print("solving $count\n");
+    print("\r\c[[Ksolving $count");
     $count ++;
     my $pid = fork();
     die unless $pid >= 0;
@@ -155,6 +155,7 @@ foreach my $opt (keys %toprint) {
 
 wait_for_one() while ($num_running > 0);
 
+print "\n";
 print "$good optimizations\n";
 print "$fail not-optimizations\n";
 print "$skip skipped due to tag match\n";
