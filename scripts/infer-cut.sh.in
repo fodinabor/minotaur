@@ -3,7 +3,7 @@
 set -e
 @LLVM_BINARY_DIR@/bin/opt -load-pass-plugin=@ONLINE_PASS@ \
   $@ \
-  -passes="minotaur-online" \
+  -passes="minotaur" \
   -minotaur-enable-caching=true \
   -minotaur-no-slice=true \
   -minotaur-force-infer=true \
