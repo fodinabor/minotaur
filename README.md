@@ -1,6 +1,7 @@
 # Minotaur: A SIMD-Oriented Synthesizing Superoptimizer
 
-A description of how Minotaur works can be found in https://arxiv.org/abs/2306.00229.
+A description of how Minotaur works can be found in
+https://arxiv.org/abs/2306.00229.
 
 ## Build Minotaur using Docker
 
@@ -14,7 +15,10 @@ To run the container use:
 
 ## Build Minotaur from source code
 
-The project requires `cmake`, `ninja-build`, `gcc-10`, `g++-10`, `redis`, `redis-server`, `libhiredis-dev`, `libbsd-resource-perl`, `libredis-perl`, `libgtest-dev`, and `re2c` as dependencies. On Ubuntu/Debian, use
+The project requires `cmake`, `ninja-build`, `gcc-10`, `g++-10`,
+`redis`, `redis-server`, `libhiredis-dev`, `libbsd-resource-perl`,
+`libredis-perl`, `libgtest-dev`, and `re2c` as dependencies. On
+Ubuntu/Debian, use
 
     sudo apt-get install cmake ninja-build gcc-10 g++-10 redis redis-server libhiredis-dev libbsd-resource-perl libredis-perl re2c libgtest-dev
 
@@ -24,14 +28,16 @@ or on mac, use
 
 to install dependencies.
 
-The Alive2 requires a LLVM compiled with RTTI and exceptions enabled, use the following command to fetch and build LLVM.
+The Alive2 requires a LLVM compiled with RTTI and exceptions enabled,
+use the following command to fetch and build LLVM.
 
     git clone git@github.com:zhengyang92/llvm $HOME/llvm
     mkdir $HOME/llvm/build && cd $HOME/llvm/build
     cmake -GNinja -DLLVM_ENABLE_RTTI=ON -DLLVM_ENABLE_EH=ON -DBUILD_SHARED_LIBS=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo -DLLVM_TARGETS_TO_BUILD=X86 -DLLVM_ENABLE_ASSERTIONS=ON -DLLVM_ENABLE_PROJECTS="llvm;clang" ../llvm
     ninja
 
-To fetch and build the Alive2 with semantics for intrinsics, use the following command.
+To fetch and build the Alive2 with semantics for intrinsics, use the
+following command.
 
     git clone git@github.com:minotaur-toolkit/alive2-intrinsics $HOME/alive2-intrinsics
     mkdir $HOME/alive2-intrinsics/build && cd $HOME/alive2-intrinsics/build
@@ -49,10 +55,63 @@ To run the test suite, use
 
     ninja check
 
-To run the program synthesizer on llvm IR files, use the following command
+## Use Minotaur
 
-    $HOME/llvm/build/bin/opt -load-pass-plugin $HOME/minotaur/build/minotaur.so -passes="minotaur-online" <LLVM bitcode>
+Minotaur can be invoked in two ways, it can be invoked online (during
+compilation), but also offline, in a mode where Minotaur extracts cuts
+into the redis cache but does not perform synthesis. In offline mode,
+a separate program called `cache-infer` retrieves cuts from the cache,
+runs synthesis on them, and stores any optimizations that it discovers
+back into the cache. Unlike the online mode, which runs synthesis
+tasks one after the other, offline mode can run all synthesis jobs in
+parallel.
 
-For C/C++ programs, we have a drop-in replacement of C/C++ compiler. Users can call `minotaur-cc` or `minotaur-cxx` in the `build` directory to compile C/C++ programs. Minotaur pass is disabled by default; the pass can be enabled by setting environment variable `ENABLE_MINOTAUR`.
 
+### Online mode
+
+To run the Minotaur on llvm IR files in online mode, use the following
+command
+
+    $HOME/llvm/build/bin/opt -load-pass-plugin $HOME/minotaur/build/minotaur.so -passes="minotaur" <LLVM bitcode>
+
+For C/C++ programs, we have a drop-in replacement of C/C++ compiler.
+Users can call `minotaur-cc` or `minotaur-cxx` in the `build`
+directory to compile C/C++ programs. Minotaur pass is disabled by
+default; the pass can be enabled by setting environment variable
+`ENABLE_MINOTAUR`.
+
+    export ENABLE_MINOTAUR=ON
     $HOME/minotaur/build/minotaur-cc <c source> [clang options]
+
+
+### Offline mode
+
+To extract cuts, one can just set the environment variable
+`MINOTAUR_NO_INFER` and run the same command as above.
+
+On single LLVM IR,
+
+    export MINOTAUR_NO_INFER=ON
+    $HOME/llvm/build/bin/opt -load-pass-plugin $HOME/minotaur/build/minotaur.so -passes="minotaur" <LLVM bitcode>
+
+On C/C++ programs,
+
+    export MINOTAUR_NO_INFER=ON
+    export ENABLE_MINOTAUR=ON
+    $HOME/minotaur/build/minotaur-cc <c source> [clang options]
+
+Run the `cache-infer` program to retrieve cuts from the cache and run
+synthesis on them.
+
+    $HOME/minotaur/build/cache-infer
+
+After running `cache-infer`, the cache will be populated with the
+optimizations that Minotaur discovered. User can run the `opt`,
+`minotaur-cc` or `minotaur-cxx`, again, to compile the program with
+the optimizations.
+
+### Read the cache
+
+To read the cache, use the following command.
+
+    $HOME/minotaur/build/cache-dump

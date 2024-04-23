@@ -467,7 +467,7 @@ struct SuperoptimizerPass : PassInfoMixin<SuperoptimizerPass> {
 
 bool pipelineParsingCallback(StringRef Name, FunctionPassManager &FPM,
                              ArrayRef<PassBuilder::PipelineElement>) {
-  if (Name == "minotaur-online") {
+  if (Name == "minotaur") {
     FPM.addPass(SuperoptimizerPass());
     return true;
   }
