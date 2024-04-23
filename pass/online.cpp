@@ -169,9 +169,13 @@ infer(Function &F, Instruction *I, redisContext *ctx, Enumerator &EN, parse::Par
 
   bool from_cache = false;
 
-  // try to parse the cached solution
-  if (enable_caching && !force_infer) {
+  // for caching, minotaur has three modes:
+  // 1. no_infer: do not run synthesizer
+  // 2. force_infer: force synthesizer even if cache hits
+  // 3. normal mode: run synthesizer if cache miss
 
+  // check cache only in normal mode
+  if (enable_caching && !force_infer && !no_infer) {
     std::string rewrite;
 
     if (minotaur::hGet(bytecode.c_str(), bytecode.size(), rewrite, ctx)) {
@@ -195,13 +199,17 @@ infer(Function &F, Instruction *I, redisContext *ctx, Enumerator &EN, parse::Par
     }
   }
 
+
   if (no_infer) {
-    if (enable_caching && !from_cache) {
+  // in no_infer mode, we write no-sol and return
+    if (enable_caching) {
       hSetNoSolution(bytecode.c_str(), bytecode.size(), ctx, F.getName());
-      return nullopt;
     }
     debug() << "[online] skipping synthesizer\n";
+    return nullopt;
   } else if (!from_cache) {
+    // in force_infer mode, as from_cache is always false, we run synthesizer
+    // in normal mode, we run synthesizer only when cache misses
     debug() << "[online] working on function:\n" << F;
     RHSs = EN.solve(F, I);
     if (RHSs.empty()) {
@@ -214,6 +222,7 @@ infer(Function &F, Instruction *I, redisContext *ctx, Enumerator &EN, parse::Par
   auto R = RHSs[0];
   debug() << "[online] synthesized solution:\n" << *R.I << "\n";
 
+  // write back to cache
   if (!from_cache && enable_caching) {
     debug()<<"[online] caching solution\n";
     string rewrite;

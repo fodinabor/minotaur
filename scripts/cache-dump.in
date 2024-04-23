@@ -13,7 +13,6 @@ use Time::HiRes;
 
 my $llvmas  = "@LLVM_BINARY_DIR@/bin/llvm-as";
 my $llvmopt = "@LLVM_BINARY_DIR@/bin/opt";
-#my $llvmdis = "@LLVM_BINARY_DIR@/bin/llvm-dis";
 
 sub runit ($) {
     my $cmd = shift;
@@ -24,9 +23,9 @@ sub runit ($) {
 sub usage() {
     print <<'END';
 Options:
-  -dumpall                            dump all LHSs
-  -tofiles                            dump all LHSs to files
-  -sort=timestamp|costdiff|reduce|cutsize    sort optimizations
+  -dumpall                                           dump all LHSs
+  -tofiles                                           dump all LHSs to files
+  -sort=timestamp|costdiff|reduce|cutsize|profile    sort optimizations
   -verbose
 END
     exit -1;
@@ -47,9 +46,10 @@ GetOptions(
     "verbose" => \$VERBOSE,
     ) or usage();
 usage() unless ($SORT eq "timestamp" ||
-                $SORT eq "costdiff" ||
-                $SORT eq "reduce" ||
-                $SORT eq "cutsize");
+                $SORT eq "costdiff"  ||
+                $SORT eq "reduce"    ||
+                $SORT eq "cutsize"   ||
+                $SORT eq "profile");
 
 my $noopt_count=0;
 
@@ -65,7 +65,6 @@ my @all_keys = $r->keys('*');
 print "; Inspecting ".scalar(@all_keys)." Redis values\n";
 
 sub parse($) {
-    #(my $opt, my $RHS) = @_;
     (my $opt) = @_;
     (my $fh, my $tmpfn) = File::Temp::tempfile();
     print $fh $opt;
@@ -84,7 +83,6 @@ sub parse($) {
     return $output;
 }
 
-
 my %toprint;
 my %ir;
 my %rewrite;
@@ -94,20 +92,21 @@ my %costdiff;
 my %reduce;
 my %timestamp;
 my %fn_name;
+my %profile;
 my %noopt;
 my %optbc;
 my %cutsize;
-
 
 if ($DUMPALL) {
     print "; Dumping all ".scalar(keys @all_keys)." rewrites\n";
     my $count = 0;
     foreach my $opt (@all_keys) {
         my %h = $r->hgetall($opt);
-        my $time   = $h{"timestamp"};
-        my $fn     = $h{"fn"};
-        my $ir     = parse($opt);
+        my $time    = $h{"timestamp"};
+        my $fn      = $h{"fn"};
+        my $profile = $h{"profile"};
         my $rewrite = $h{"rewrite"};
+        my $ir      = parse($opt);
         if ($TOFILES) {
             open(my $fh, ">", "dump_$count.ll");
             print $fh $ir;
@@ -117,6 +116,7 @@ if ($DUMPALL) {
             print $ir, "\n";
             print "rewrite: $rewrite\n";
             print "timestamp: $time\n";
+            print "profile: $profile\n";
             print "in fn: $fn\n";
             print "\n------------------------------------------------------\n";
         }
@@ -128,21 +128,17 @@ if ($DUMPALL) {
 foreach my $opt (@all_keys) {
     my %h = $r->hgetall($opt);
 
-    my $result = $h{"rewrite"};
-    my $time   = $h{"timestamp"};
-    my $fn     = $h{"fn"};
-
-    $noopt{$opt} = $result eq "<no-sol>";
+    my $rewrite  = $h{"rewrite"};
+    $noopt{$opt} = $rewrite eq "<no-sol>";
 
     if ($noopt{$opt}) {
         $noopt_count++;
         next;
     }
 
-    $ir{$opt} = parse($opt);
-    $fn_name{$opt} = $fn;
-    $timestamp{$opt} = $time;
-
+    my $time    = $h{"timestamp"};
+    my $fn      = $h{"fn"};
+    my $pf      = $h{"profile"};
     my $ca     = $h{"costafter"};
     my $cb     = $h{"costbefore"};
     if ($cb == 0) {
@@ -151,13 +147,19 @@ foreach my $opt (@all_keys) {
     if ($ca == 0) {
         $ca = 1;
     }
+
+    $ir{$opt} = parse($opt);
+
     $toprint{$opt} = 1;
     $costafter{$opt} = $ca;
     $costbefore{$opt} = $cb;
     $costdiff{$opt} = $cb - $ca;
     $reduce{$opt} = ($cb - $ca * 1.0) / $cb;
-    $rewrite{$opt} = $result;
+    $rewrite{$opt} = $rewrite;
     $cutsize{$opt} = length($optbc{$opt});
+    $profile{$opt} = $pf;
+    $fn_name{$opt} = $fn;
+    $timestamp{$opt} = $time;
 }
 
 
@@ -170,59 +172,42 @@ sub bytimestamp { $timestamp{$b} <=> $timestamp{$a} }
 sub bycostdiff { $costdiff{$b} <=> $costdiff{$a} }
 sub byreduce { $reduce{$b} <=> $reduce{$a} }
 sub bycutsize { $cutsize{$b} <=> $cutsize{$a} }
+sub byprofile { $profile{$b} <=> $profile{$a} }
 
 my $byx;
 $byx = \&bytimestamp if ($SORT eq "timestamp");
 $byx = \&bycostdiff if ($SORT eq "costdiff");
 $byx = \&byreduce if ($SORT eq "reduce");
 $byx = \&bycutsize if ($SORT eq "cutsize");
+$byx = \&byprofile if ($SORT eq "profile");
 
 
 my $count = 0;
 foreach my $opt (sort $byx keys %toprint) {
-    my $ir   = $ir{$opt};
-    my $time = $timestamp{$opt};
-    my $fn   = $fn_name{$opt};
+    my $ir      = $ir{$opt};
+    my $time    = $timestamp{$opt};
+    my $fn      = $fn_name{$opt};
     my $rewrite = $rewrite{$opt};
-    my $ca = $costafter{$opt};
-    my $cb = $costbefore{$opt};
-    # my $obc = $optbc{$opt};
+    my $ca      = $costafter{$opt};
+    my $cb      = $costbefore{$opt};
+    my $pf      = $profile{$opt};
 
     if ($TOFILES) {
         open(my $fh, ">", "dump_$count.src.ll");
         print $fh $ir, "\n";
         $fh->flush();
         close $fh;
-        # open($fh, ">", "dump_$count.tgt.ll");
-        # print $fh $obc, "\n";
-        # $fh->flush();
-        # close $fh;
     } else {
         print "; opt ---------------------------------------------------\n";
         print $ir;
-        # print "; tgt ---------------------------------------------------\n";
-        # print $obc, "\n";
         print "; minotaur_rewrite: $rewrite \n";
         print "; minotaur_cost-before: $cb\n";
         print "; minotaur_cost-after: $ca\n";
         print "; minotaur_timestamp: $time\n";
+        print "; minotaur_profile: $pf\n";
         print "; minotaur_fn: $fn\n";
     }
     $count = $count + 1;
-
-    # print "\n";
-    # print "; total static profile = $sprofiles{$opt}\n";
-    # my %h = %{$sprofile_locs{$opt}};
-    # foreach my $k (sort { $h{$b} <=> $h{$a} } keys %h) {
-    #     next if ($k eq "");
-    #     print "; sprofile $h{$k} \"$k\"\n";
-    # }
-    # print "; total dynamic profile = $dprofiles{$opt}\n";
-    # %h = %{$dprofile_locs{$opt}};
-    # foreach my $k (sort { $h{$b} <=> $h{$a} } keys %h) {
-    #     next if ($k eq "");
-    #     print "; dprofile $h{$k} \"$k\"\n";
-    # }
 }
 
 # my $cnt = 0;

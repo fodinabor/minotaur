@@ -77,6 +77,15 @@ void hSetNoSolution(const char *k, unsigned sz_k,
       "Redis protocol error for cache fill, didn't expect reply type " +
       to_string(reply->type));
   }
+  // static profile
+  reply = (redisReply *)redisCommand(c, "HINCRBY %b profile 1", k, sz_k);
+  if (!reply || c->err)
+    report_fatal_error((StringRef)"Redis error: " + c->errstr);
+  if (reply->type != REDIS_REPLY_INTEGER) {
+    report_fatal_error((StringRef)
+      "Redis protocol error for cache fill, didn't expect reply type " +
+      to_string(reply->type));
+  }
   freeReplyObject(reply);
 }
 
