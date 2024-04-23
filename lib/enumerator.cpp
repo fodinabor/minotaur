@@ -858,7 +858,7 @@ push:
         Good = AE.compareFunctions(*Src, *Tgt);
       } else {
         AliveEngine AE(TLI, true);
-        Good = false;//AE.constantSynthesis(*Src, *Tgt, ConstantResults);
+        Good = AE.constantSynthesis(*Src, *Tgt, ConstantResults);
       }
     } catch (AliveException E) {
       debug() << E.msg << "\n";
