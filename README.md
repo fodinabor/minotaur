@@ -110,8 +110,8 @@ optimizations that Minotaur discovered. User can run the `opt`,
 `minotaur-cc` or `minotaur-cxx`, again, to compile the program with
 the optimizations.
 
-### Read the cache
+### Dump synthesized results from cache
 
-To read the cache, use the following command.
+To dump synthesized results from cache, use `cache-dump`.
 
     $HOME/minotaur/build/cache-dump
