@@ -83,22 +83,27 @@ default; the pass can be enabled by setting environment variable
     export ENABLE_MINOTAUR=ON
     $HOME/minotaur/build/minotaur-cc <c source> [clang options]
 
-
 ### Offline mode
+
+#### Extract cuts from source
 
 To extract cuts, one can just set the environment variable
 `MINOTAUR_NO_INFER` and run the same command as above.
 
-On single LLVM IR,
+For a single LLVM IR source,
 
-    export MINOTAUR_NO_INFER=ON
-    $HOME/llvm/build/bin/opt -load-pass-plugin $HOME/minotaur/build/minotaur.so -passes="minotaur" <LLVM bitcode>
+    MINOTAUR_NO_INFER=ON $HOME/llvm/build/bin/opt -load-pass-plugin $HOME/minotaur/build/minotaur.so -passes="minotaur" <LLVM bitcode>
 
-On C/C++ programs,
+For a single C/C++ source,
 
-    export MINOTAUR_NO_INFER=ON
-    export ENABLE_MINOTAUR=ON
-    $HOME/minotaur/build/minotaur-cc <c source> [clang options]
+    ENABLE_MINOTAUR=ON MINOTAUR_NO_INFER=ON $HOME/minotaur/build/minotaur-cc <c source> [clang options]
+
+For a C/C++ project, simply set CC and CXX to `minotaur-cc` and `minotaur-cxx`, and run `configure` as usual. Set `ENABLE_MINOTAUR` and `MINOTAUR_NO_INFER` to `ON` for `make`.
+
+    CC=$HOME/minotaur/build/minotaur-cc CXX=$HOME/minotaur/build/minotaur-cxx ./configure
+    ENABLE_MINOTAUR=ON MINOTAUR_NO_INFER=ON make
+
+#### Run synthesis on cuts
 
 Run the `cache-infer` program to retrieve cuts from the cache and run
 synthesis on them.
