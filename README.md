@@ -112,8 +112,8 @@ synthesis on them.
 
 After running `cache-infer`, the cache will be populated with the
 optimizations that Minotaur discovered. User can run the `opt`,
-`minotaur-cc` or `minotaur-cxx`, again, to compile the program with
-the optimizations.
+`minotaur-cc`, `minotaur-cxx` or `make`  again, to compile the program
+with the synthesized optimizations.
 
 ### Dump synthesized results from cache
 
