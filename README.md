@@ -1,5 +1,7 @@
 # Minotaur: A SIMD-Oriented Synthesizing Superoptimizer
 
+[![Build](https://github.com/minotaur-toolkit/minotaur/actions/workflows/build.yml/badge.svg)](https://github.com/minotaur-toolkit/minotaur/actions/workflows/build.yml)
+
 A description of how Minotaur works can be found in
 https://arxiv.org/abs/2306.00229.
 
@@ -24,7 +26,7 @@ Ubuntu/Debian, use
 
 or on mac, use
 
-    brew install re2c z3 hiredis redis
+    brew install cmake re2c z3 hiredis redis
 
 to install dependencies.
 
