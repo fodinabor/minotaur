@@ -136,9 +136,9 @@ target_link_libraries(minotaur-slice
   $<$<AND:$<CXX_COMPILER_ID:GNU>,$<VERSION_LESS:$<CXX_COMPILER_VERSION>,9.0>>:stdc++fs>)
 
 add_llvm_executable(parse-tests "unit-tests/parse-tests.cpp")
-set(GTEST_LIBS "-lgtest_main -lgtest -lpthread")
+find_package(GTest REQUIRED)
 target_link_libraries(parse-tests
-  PRIVATE synthesizer ${GTEST_LIBS} ${Z3_LIBRARIES}
+  PRIVATE synthesizer GTest::gtest GTest::gtest_main  ${Z3_LIBRARIES}
   $<$<AND:$<CXX_COMPILER_ID:GNU>,$<VERSION_LESS:$<CXX_COMPILER_VERSION>,9.0>>:stdc++fs>)
 
 if(APPLE)
