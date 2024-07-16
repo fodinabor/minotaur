@@ -63,6 +63,7 @@ namespace minotaur {
 bool
 AliveEngine::compareFunctions(llvm::Function &Func1, llvm::Function &Func2) {
   smt::smt_initializer smt_init;
+  llvm_util::initializer init{*debug, Func1.getParent()->getDataLayout()};
   llvm_util::Verifier verifier(TLI, smt_init, *debug);
   verifier.quiet = false;
   verifier.compareFunctions(Func1, Func2);
@@ -237,6 +238,7 @@ AliveEngine::constantSynthesis(llvm::Function &src, llvm::Function &tgt,
 
   std::optional<smt::smt_initializer> smt_init;
   smt_init.emplace();
+  llvm_util::initializer init{*debug, tgt.getParent()->getDataLayout()};
 
   auto Func1 = llvm_util::llvm2alive(src, TLI.getTLI(src), true);
   auto Func2 = llvm_util::llvm2alive(tgt, TLI.getTLI(tgt), true);
